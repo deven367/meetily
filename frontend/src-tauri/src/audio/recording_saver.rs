@@ -55,6 +55,7 @@ pub struct RecordingSaver {
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     chunk_receiver: Option<mpsc::UnboundedReceiver<AudioChunk>>,
     is_saving: Arc<Mutex<bool>>,
+    save_folder: PathBuf,
 }
 
 impl RecordingSaver {
@@ -67,6 +68,7 @@ impl RecordingSaver {
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
             chunk_receiver: None,
             is_saving: Arc::new(Mutex::new(false)),
+            save_folder: super::recording_preferences::get_default_recordings_folder(),
         }
     }
 
@@ -137,12 +139,20 @@ impl RecordingSaver {
     ///
     /// # Arguments
     /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
-    pub fn start_accumulation(&mut self, auto_save: bool) -> mpsc::UnboundedSender<AudioChunk> {
+    /// * `save_folder` - Base folder for meeting recordings (from user preferences)
+    pub fn start_accumulation(&mut self, auto_save: bool, save_folder: PathBuf) -> mpsc::UnboundedSender<AudioChunk> {
         if auto_save {
             info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
         } else {
             info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
         }
+
+        // Use the user's configured save folder (falls back to default when unset)
+        self.save_folder = if save_folder.as_os_str().is_empty() {
+            super::recording_preferences::get_default_recordings_folder()
+        } else {
+            save_folder
+        };
 
         // Create channel for receiving audio chunks
         let (sender, receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -228,10 +238,8 @@ impl RecordingSaver {
     /// * `meeting_name` - Name of the meeting
     /// * `create_checkpoints` - Whether to create .checkpoints/ directory and IncrementalAudioSaver
     fn initialize_meeting_folder(&mut self, meeting_name: &str, create_checkpoints: bool) -> Result<()> {
-        // Load preferences to get base recordings folder
-        let base_folder = super::recording_preferences::get_default_recordings_folder();
-
-        // Create meeting folder structure (with or without .checkpoints/ subdirectory)
+        // Use the user's configured recordings folder
+        let base_folder = self.save_folder.clone();
         let meeting_folder = create_meeting_folder(&base_folder, meeting_name, create_checkpoints)?;
 
         // Only initialize incremental saver if checkpoints are needed (auto_save is true)

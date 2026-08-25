@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
-import { FolderOpen } from 'lucide-react';
+import { FolderOpen, FolderInput } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
@@ -104,6 +104,18 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   };
 
+  const handleChangeFolder = async () => {
+    try {
+      const selected = await invoke<string | null>('select_recording_folder');
+      if (selected) {
+        const newPreferences = { ...preferences, save_folder: selected };
+        setPreferences(newPreferences);
+        await savePreferences(newPreferences);
+      }
+    } catch (error) {
+      console.error('Failed to select recordings folder:', error);
+    }
+  };
   const handleNotificationToggle = async (enabled: boolean) => {
     try {
       setShowRecordingNotification(enabled);
@@ -127,12 +139,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await invoke('set_recording_preferences', { preferences: prefs });
       onSave?.(prefs);
 
-      // Show success toast with device details
-      const micDevice = prefs.preferred_mic_device || 'Default';
-      const systemDevice = prefs.preferred_system_device || 'Default';
-      toast.success("Device preferences saved", {
-        description: `Microphone: ${micDevice}, System Audio: ${systemDevice}`
-      });
+      // Show success toast
+      toast.success("Recording settings saved");
     } catch (error) {
       console.error('Failed to save recording preferences:', error);
       toast.error("Failed to save device preferences", {
@@ -184,13 +192,22 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             <div className="text-sm text-gray-600 mb-3 break-all">
               {preferences.save_folder || 'Default folder'}
             </div>
-            <button
-              onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
-            >
-              <FolderOpen className="w-4 h-4" />
-              Open Folder
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleChangeFolder}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+              >
+                <FolderInput className="w-4 h-4" />
+                Change Folder
+              </button>
+              <button
+                onClick={handleOpenFolder}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Open Folder
+              </button>
+            </div>
           </div>
 
           <div className="p-4 border rounded-lg bg-blue-50">
