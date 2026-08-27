@@ -338,8 +338,14 @@ async fn run_import<R: Runtime>(
         return Err(anyhow!("Import cancelled"));
     }
 
-    // Create meeting folder
-    let base_folder = get_default_recordings_folder();
+    // Create meeting folder in the user's configured recordings folder
+    let base_folder = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => prefs.save_folder,
+        Err(e) => {
+            log::warn!("Failed to load recording preferences for import, using default folder: {}", e);
+            get_default_recordings_folder()
+        }
+    };
     let meeting_folder = create_meeting_folder(&base_folder, &title, false)?;
 
     // Copy audio file to meeting folder
