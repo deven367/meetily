@@ -257,7 +257,10 @@ pub async fn select_recording_folder<R: Runtime>(
         .blocking_pick_folder();
 
     if let Some(path) = folder_path {
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = path
+            .as_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
         info!("User selected recordings folder: {}", path_str);
         Ok(Some(path_str))
     } else {
