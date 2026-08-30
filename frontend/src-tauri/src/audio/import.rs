@@ -330,6 +330,7 @@ async fn run_import<R: Runtime>(
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_cloud = matches!(provider.as_deref(), Some("openai") | Some("openrouter"));
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -514,7 +515,7 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
+    let whisper_engine = if !use_parakeet && !use_cloud && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
@@ -524,6 +525,13 @@ async fn run_import<R: Runtime>(
     } else {
         None
     };
+    let cloud_engine: Option<Arc<crate::audio::transcription::cloud_provider::CloudTranscriptionProvider>> =
+        if use_cloud && total_segments > 0 {
+            let provider_id = provider.clone().unwrap();
+            Some(get_or_init_cloud(&app, &provider_id, model.as_deref()).await?)
+        } else {
+            None
+        };
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -592,6 +600,13 @@ async fn run_import<R: Runtime>(
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.9f32)
+        } else if let Some(engine) = cloud_engine.as_ref() {
+            use crate::audio::transcription::provider::TranscriptionProvider;
+            let result = engine
+                .transcribe(segment.samples.clone(), language.clone())
+                .await
+                .map_err(|e| anyhow!("Cloud transcription failed on segment {}: {}", i, e))?;
+            (result.text, 0.9f32)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _) = engine
@@ -843,6 +858,60 @@ async fn get_or_init_parakeet<R: Runtime>(
         }
         None => Err(anyhow!("Parakeet engine not initialized")),
     }
+}
+
+/// Get a cloud transcription provider (OpenAI/OpenRouter) from saved settings.
+/// The explicit `requested_model` (from the import dialog) wins over the saved model.
+async fn get_or_init_cloud<R: Runtime>(
+    app: &AppHandle<R>,
+    provider_id: &str,
+    requested_model: Option<&str>,
+) -> Result<Arc<crate::audio::transcription::cloud_provider::CloudTranscriptionProvider>> {
+    use crate::audio::transcription::cloud_provider::CloudTranscriptionProvider;
+
+    let app_state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow!("App state not available"))?;
+    let pool = app_state.db_manager.pool();
+
+    // Saved transcript settings (model fallback)
+    let configured: Option<(String, String)> = sqlx::query_as(
+        "SELECT provider, model FROM transcript_settings WHERE id = '1'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow!("Failed to query transcript config: {}", e))?;
+
+    let configured_model = configured
+        .map(|(_, model)| model)
+        .filter(|m| !m.trim().is_empty());
+
+    // API key for the cloud provider
+    let api_key = crate::database::repositories::setting::SettingsRepository::get_transcript_api_key(
+        pool, provider_id,
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to read {} API key: {}", provider_id, e))?;
+
+    let provider_label = if provider_id == "openrouter" { "OpenRouter" } else { "OpenAI" };
+
+    let api_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "No {} API key configured. Open Settings → Transcription and add your {} API key.",
+                provider_label, provider_label
+            )
+        })?;
+
+    let model = match requested_model {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ if let Some(m) = configured_model.as_ref() => m.clone(),
+        _ => CloudTranscriptionProvider::default_model(provider_id),
+    };
+
+    info!("Using cloud transcription for import: provider={}, model={}", provider_id, model);
+    Ok(Arc::new(CloudTranscriptionProvider::new(provider_id, api_key, model)))
 }
 
 /// Get the configured model from database

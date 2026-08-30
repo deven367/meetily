@@ -2,6 +2,7 @@
 //
 // TranscriptionEngine enum and model initialization/validation logic.
 
+use super::cloud_provider::CloudTranscriptionProvider;
 use super::provider::TranscriptionProvider;
 use log::{info, warn};
 use std::sync::Arc;
@@ -135,6 +136,30 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "openai" | "openrouter" => {
+            let provider_label = if config.provider == "openrouter" {
+                "OpenRouter"
+            } else {
+                "OpenAI"
+            };
+            info!("🔍 Validating {} cloud transcription config...", provider_label);
+            match &config.api_key {
+                Some(key) if !key.trim().is_empty() => {
+                    info!(
+                        "✅ {} API key configured — cloud transcription ready (model: {})",
+                        provider_label, config.model
+                    );
+                    Ok(())
+                }
+                _ => {
+                    warn!("❌ No {} API key configured", provider_label);
+                    Err(format!(
+                        "No {} API key configured. Open Settings → Transcription and add your {} API key.",
+                        provider_label, provider_label
+                    ))
+                }
+            }
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
@@ -211,6 +236,34 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
             }
+        }
+        "openai" | "openrouter" => {
+            let provider_label = if config.provider == "openrouter" {
+                "OpenRouter"
+            } else {
+                "OpenAI"
+            };
+            info!(
+                "☁️ Initializing {} cloud transcription engine (model: {})",
+                provider_label, config.model
+            );
+
+            let api_key = config.api_key.clone().unwrap_or_default();
+            if api_key.trim().is_empty() {
+                return Err(format!(
+                    "No {} API key configured. Open Settings → Transcription and add your {} API key.",
+                    provider_label, provider_label
+                ));
+            }
+
+            let model = if config.model.trim().is_empty() {
+                CloudTranscriptionProvider::default_model(&config.provider)
+            } else {
+                config.model.clone()
+            };
+
+            let provider = CloudTranscriptionProvider::new(&config.provider, api_key, model);
+            Ok(TranscriptionEngine::Provider(Arc::new(provider)))
         }
         "localWhisper" | _ => {
             info!("🎤 Initializing Whisper transcription engine");
