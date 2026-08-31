@@ -8,7 +8,7 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet';
+  provider: 'whisper' | 'parakeet' | 'openai' | 'openrouter';
   name: string;
   displayName: string;
   size_mb: number;
@@ -76,6 +76,16 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     } catch (err) {
       console.error('Failed to fetch Parakeet models:', err);
     }
+    // Cloud models (OpenAI / OpenRouter) — static lists, no local download
+    const cloudModels: ModelOption[] = [
+      { provider: 'openai', name: 'gpt-4o-transcribe', displayName: '☁️ OpenAI: gpt-4o-transcribe', size_mb: 0 },
+      { provider: 'openai', name: 'gpt-4o-mini-transcribe', displayName: '☁️ OpenAI: gpt-4o-mini-transcribe', size_mb: 0 },
+      { provider: 'openai', name: 'whisper-1', displayName: '☁️ OpenAI: whisper-1', size_mb: 0 },
+      { provider: 'openrouter', name: 'openai/whisper-1', displayName: '☁️ OpenRouter: openai/whisper-1', size_mb: 0 },
+      { provider: 'openrouter', name: 'openai/whisper-large-v3', displayName: '☁️ OpenRouter: openai/whisper-large-v3', size_mb: 0 },
+      { provider: 'openrouter', name: 'openai/gpt-4o-transcribe', displayName: '☁️ OpenRouter: openai/gpt-4o-transcribe', size_mb: 0 },
+    ];
+    allModels.push(...cloudModels);
 
     setAvailableModels(allModels);
 
@@ -88,7 +98,9 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const configuredMatch = allModels.find(
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel)
+        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
+        (configuredProvider === 'openai' && m.provider === 'openai' && m.name === configuredModel) ||
+        (configuredProvider === 'openrouter' && m.provider === 'openrouter' && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one
