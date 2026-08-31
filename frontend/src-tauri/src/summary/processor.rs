@@ -214,8 +214,6 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 
     let mut chunks = Vec::new();
     let mut start_char = 0;
-    // Step is the size of the non-overlapping part of the window
-    let step = chunk_size_chars.saturating_sub(overlap_chars).max(1);
 
     while start_char < total_chars {
         let end_char = (start_char + chunk_size_chars).min(total_chars);
@@ -239,12 +237,16 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
         // Extract chunk
         chunks.push(text[start_byte..end_byte].to_string());
 
+        // Advance from the boundary that was actually emitted: the sentence/word
+        // adjustment above can shorten the chunk, and advancing a fixed window
+        // step from the unadjusted end would skip the characters in between.
         if end_char >= total_chars {
             break;
         }
-
-        // Move to next chunk with overlap (in character units)
-        start_char += step;
+        let emitted_chars = text[start_byte..end_byte].chars().count();
+        start_char = (start_char + emitted_chars)
+            .saturating_sub(overlap_chars)
+            .max(start_char + 1);
     }
 
     info!("Created {} chunks from text", chunks.len());
@@ -708,6 +710,62 @@ async fn normalize_markdown_to_english(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for upstream issue #602: advancing a fixed window
+    /// step after a boundary-shortened chunk silently dropped the text
+    /// between the emitted end and the next chunk start.
+    #[test]
+    fn chunk_text_does_not_drop_text_after_boundary_shortened_chunk() {
+        let text = "Intro. LOST_MARKER trailing content ensures chunking";
+        let chunks = chunk_text(text, 10, 1);
+
+        assert!(chunks.len() > 1, "repro requires multiple chunks: {chunks:?}");
+        assert!(
+            chunks.iter().any(|c| c.contains("LOST_MARKER")),
+            "range lost by fixed-step advance: {chunks:?}"
+        );
+    }
+
+    /// Chunks must tile the original text: each chunk starts at or before the
+    /// end of the previous one, so no transcript range is skipped. Character
+    /// based so multibyte (non-ASCII) transcripts are covered too.
+    #[test]
+    fn chunk_text_covers_text_without_gaps() {
+        let mut text = (0..60)
+            .map(|i| format!("Sentence number {i} is here. "))
+            .collect::<String>();
+        text.push_str("会議の要点. 重要マークはここ. 最後の文.");
+        let chunks = chunk_text(&text, 40, 5);
+
+        assert!(chunks.len() > 2);
+        let chars: Vec<char> = text.chars().collect();
+        let mut search_from = 0usize;
+        let mut prev_end = 0usize;
+        for chunk in &chunks {
+            let chunk_chars: Vec<char> = chunk.chars().collect();
+            let pos = (search_from..=chars.len() - chunk_chars.len())
+                .find(|&i| chars[i..i + chunk_chars.len()] == chunk_chars[..])
+                .unwrap_or_else(|| panic!("chunk not found in order: {chunk:?}"));
+            assert!(
+                pos <= prev_end,
+                "gap of {} chars before chunk {pos}: {chunk:?}",
+                pos.saturating_sub(prev_end)
+            );
+            prev_end = pos + chunk_chars.len();
+            search_from = pos;
+        }
+        assert_eq!(prev_end, chars.len(), "trailing text not covered");
+    }
+
+    /// Overlap at least as large as the window must still make progress
+    /// and terminate.
+    #[test]
+    fn chunk_text_terminates_when_overlap_equals_chunk_size() {
+        let text: String = (0..30).map(|i| format!("word {i} ")).collect();
+        let chunks = chunk_text(&text, 5, 5);
+
+        assert!(!chunks.is_empty());
+    }
 
     #[test]
     fn chunk_summary_prompt_forces_english_base_output() {
