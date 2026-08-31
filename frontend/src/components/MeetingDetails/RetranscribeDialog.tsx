@@ -299,7 +299,7 @@ export function RetranscribeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
+        <div className="min-w-0 space-y-4 py-4">
           {!isProcessing && !error && (
             !isParakeetModel ? (
               <div className="space-y-3">
