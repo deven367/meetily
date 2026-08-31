@@ -1,9 +1,11 @@
 use crate::api::TranscriptSegment;
+use crate::state::AppState;
 use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
@@ -209,6 +211,71 @@ pub(crate) fn split_segment_at_silence(
     }
 
     result
+}
+
+/// Resolve a cloud transcription provider (OpenAI/OpenRouter) from saved
+/// settings. Shared by the import and retranscription paths.
+///
+/// Model precedence: the explicit `requested_model` (from the dialog) wins,
+/// then the saved transcript config, then the provider default. The saved
+/// model is only honored when it was saved for this provider and is still a
+/// valid model id for it — stale values (e.g. the old 'gpt-4o') and
+/// provider/model cross-contamination fall through to the default.
+pub async fn get_or_init_cloud_provider<R: Runtime>(
+    app: &AppHandle<R>,
+    provider_id: &str,
+    requested_model: Option<&str>,
+) -> Result<Arc<crate::audio::transcription::cloud_provider::CloudTranscriptionProvider>> {
+    use crate::audio::transcription::cloud_provider::CloudTranscriptionProvider;
+    use crate::database::repositories::setting::SettingsRepository;
+
+    let app_state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| anyhow::anyhow!("App state not available"))?;
+    let pool = app_state.db_manager.pool();
+
+    // Saved transcript settings (model fallback)
+    let configured: Option<(String, String)> = sqlx::query_as(
+        "SELECT provider, model FROM transcript_settings WHERE id = '1'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to query transcript config: {}", e))?;
+
+    let configured_model = configured
+        .filter(|(saved_provider, _)| saved_provider == provider_id)
+        .map(|(_, model)| model)
+        .filter(|m| !m.trim().is_empty())
+        .filter(|m| CloudTranscriptionProvider::is_valid_model(provider_id, m));
+
+    // API key for the cloud provider
+    let api_key = SettingsRepository::get_transcript_api_key(pool, provider_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read {} API key: {}", provider_id, e))?;
+
+    let provider_label = if provider_id == "openrouter" { "OpenRouter" } else { "OpenAI" };
+
+    let api_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No {} API key configured. Open Settings → Transcription and add your {} API key.",
+                provider_label,
+                provider_label
+            )
+        })?;
+
+    let model = match requested_model {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ if let Some(m) = configured_model => m,
+        _ => CloudTranscriptionProvider::default_model(provider_id),
+    };
+
+    info!(
+        "Using cloud transcription: provider={}, model={}",
+        provider_id, model
+    );
+    Ok(Arc::new(CloudTranscriptionProvider::new(provider_id, api_key, model)))
 }
 
 #[cfg(test)]

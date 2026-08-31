@@ -197,7 +197,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config:', config);
+          console.log('[ConfigContext] Loaded saved transcript config:', { provider: config.provider, model: config.model, hasApiKey: Boolean(config.apiKey) });
           setTranscriptModelConfig({
             provider: config.provider || 'parakeet',
             model: config.model || 'parakeet-tdt-0.6b-v3-int8',

@@ -256,7 +256,15 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 ));
             }
 
-            let model = if config.model.trim().is_empty() {
+            let model = if config.model.trim().is_empty()
+                || !CloudTranscriptionProvider::is_valid_model(&config.provider, &config.model)
+            {
+                if !config.model.trim().is_empty() {
+                    warn!(
+                        "Model '{}' is not valid for {}; using default",
+                        config.model, provider_label
+                    );
+                }
                 CloudTranscriptionProvider::default_model(&config.provider)
             } else {
                 config.model.clone()

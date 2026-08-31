@@ -41,15 +41,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     }, [transcriptModelConfig.provider]);
 
-    // On mount, load the stored key for providers that use one (the field's local
-    // state is initialized before the async config load resolves)
+    // Load the stored key for the active provider. The field's local state is
+    // initialized before the async config load resolves, so this also runs
+    // when the provider becomes known after load.
     useEffect(() => {
         const provider = transcriptModelConfig.provider;
         if (['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(provider)) {
             fetchApiKey(provider);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [transcriptModelConfig.provider]);
 
     const fetchApiKey = async (provider: string) => {
         try {
@@ -71,7 +72,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         openai: ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
         openrouter: ['openai/whisper-1', 'openai/whisper-large-v3', 'openai/gpt-4o-transcribe'],
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'openrouter' || transcriptModelConfig.provider === 'groq';
+    const requiresApiKey = ['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(uiProvider);
 
     // Persist the currently shown selection (provider + model + API key) to the backend.
     // Mirrors the Save flow of the summary model settings.
@@ -79,7 +80,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         setIsSaving(true);
         try {
             const providerNeedsKey = ['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(uiProvider);
-            const keyToSave = providerNeedsKey && apiKey && apiKey.trim() ? apiKey.trim() : null;
+            // Empty string (field unlocked and cleared) deletes the stored key; null leaves it untouched.
+            const keyToSave = providerNeedsKey ? (apiKey && apiKey.trim() ? apiKey.trim() : '') : null;
 
             await invoke('api_save_transcript_config', {
                 provider: uiProvider,
@@ -158,7 +160,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
                                     if (provider !== 'localWhisper' && provider !== 'parakeet') {
-                                        fetchApiKey(provider);
+                                        // Reset the model to this provider's default so a stale
+                                        // model from another provider (e.g. parakeet-*) is never
+                                        // shown or saved alongside it.
+                                        setTranscriptModelConfig({
+                                            ...transcriptModelConfig,
+                                            provider,
+                                            model: modelOptions[provider][0],
+                                        });
                                     }
                                 }}
                             >
@@ -193,6 +202,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             )}
 
                         </div>
+                        {(uiProvider === 'openai' || uiProvider === 'openrouter') && (
+                            <p className="text-xs text-gray-500 mt-2 mx-1">
+                                Cloud transcription uploads audio in chunks over your connection while recording; results depend on network latency.
+                            </p>
+                        )}
                     </div>
 
                     {uiProvider === 'localWhisper' && (

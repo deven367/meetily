@@ -233,6 +233,32 @@ impl SettingsRepository {
         Ok(api_key)
     }
 
+    pub async fn clear_transcript_api_key(
+        pool: &SqlitePool,
+        provider: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let api_key_column = match provider {
+            "deepgram" => "deepgramApiKey",
+            "elevenLabs" => "elevenLabsApiKey",
+            "groq" => "groqApiKey",
+            "openai" => "openaiApiKey",
+            "openrouter" => "openRouterApiKey",
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    format!("Invalid provider: {}", provider).into(),
+                ))
+            }
+        };
+
+        let query = format!(
+            "UPDATE transcript_settings SET {} = NULL WHERE id = '1'",
+            api_key_column
+        );
+        sqlx::query(&query).execute(pool).await?;
+
+        Ok(())
+    }
+
     pub async fn delete_api_key(
         pool: &SqlitePool,
         provider: &str,

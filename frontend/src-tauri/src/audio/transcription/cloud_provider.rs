@@ -73,6 +73,25 @@ impl CloudTranscriptionProvider {
             _ => DEFAULT_OPENAI_TRANSCRIPTION_MODEL.to_string(),
         }
     }
+
+    /// Model ids currently offered to the user per provider.
+    /// Kept in sync with the frontend model dropdown (TranscriptSettings).
+    pub fn valid_models(provider: &str) -> Vec<&'static str> {
+        match provider {
+            "openai" => vec!["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"],
+            "openrouter" => vec![
+                "openai/whisper-1",
+                "openai/whisper-large-v3",
+                "openai/gpt-4o-transcribe",
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether `model` is a currently valid model id for `provider`.
+    pub fn is_valid_model(provider: &str, model: &str) -> bool {
+        Self::valid_models(provider).iter().any(|m| *m == model.trim())
+    }
 }
 
 /// Encode 16 kHz mono f32 samples as a 16-bit PCM WAV file (44-byte header).
