@@ -436,17 +436,19 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         setNotificationSettings(null);
       }
 
-      // Load storage locations
-      const [dbDir, modelsDir, recordingsDir] = await Promise.all([
+      // Load storage locations. Recordings shows the *effective* save
+      // folder (user-configured save_folder, default when unset) — the
+      // same folder open_recordings_folder opens — not just the default.
+      const [dbDir, modelsDir, recordingPrefs] = await Promise.all([
         invoke<string>('get_database_directory'),
         invoke<string>('whisper_get_models_directory'),
-        invoke<string>('get_default_recordings_folder_path')
+        invoke<{ save_folder: string }>('get_recording_preferences')
       ]);
 
       setStorageLocations({
         database: dbDir,
         models: modelsDir,
-        recordings: recordingsDir
+        recordings: recordingPrefs.save_folder
       });
 
       // Mark as loaded
