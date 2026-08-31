@@ -150,6 +150,26 @@ export function getRecommendedModel(systemSpecs?: { ram: number; cores: number }
 
 // Tauri command wrappers for Parakeet backend
 import { invoke } from '@tauri-apps/api/core';
+/**
+ * Flatten the backend wire shape of `ModelStatus::Downloading`.
+ * Rust serializes the struct variant as `{"Downloading":{"progress":N}}`;
+ * the UI type and live progress events use the flat `{ Downloading: N }`.
+ */
+function normalizeDownloadingStatus(raw: unknown): ModelStatus {
+  if (typeof raw === 'object' && raw !== null && 'Downloading' in raw) {
+    const downloading = raw.Downloading;
+    if (typeof downloading === 'object' && downloading !== null && 'progress' in downloading) {
+      const progress = downloading.progress;
+      if (typeof progress === 'number') {
+        return { Downloading: progress };
+      }
+    }
+    // Malformed Downloading payload: fall back to 0% rather than NaN%
+    return { Downloading: 0 };
+  }
+  return raw as ModelStatus;
+}
+
 
 export class ParakeetAPI {
   static async init(): Promise<void> {
@@ -157,7 +177,12 @@ export class ParakeetAPI {
   }
 
   static async getAvailableModels(): Promise<ParakeetModelInfo[]> {
-    return await invoke('parakeet_get_available_models');
+    const models = await invoke<ParakeetModelInfo[]>('parakeet_get_available_models');
+    // The Rust `ModelStatus::Downloading { progress }` variant serializes as a
+    // nested object ({"Downloading":{"progress":N}}) while the UI type and the
+    // live progress events use the flat { Downloading: N } shape. Normalize the
+    // wire shape here so the download card renders a percentage instead of NaN% (#742).
+    return models.map(m => ({ ...m, status: normalizeDownloadingStatus(m.status) }));
   }
 
   static async loadModel(modelName: string): Promise<void> {

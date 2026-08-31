@@ -278,6 +278,26 @@ export function getRecommendedModel(systemSpecs?: { ram: number; cores: number }
 
 // Tauri command wrappers for whisper-rs backend
 import { invoke } from '@tauri-apps/api/core';
+/**
+ * Flatten the backend wire shape of `ModelStatus::Downloading` (see #742).
+ * Rust serializes the struct variant as `{"Downloading":{"progress":N}}`;
+ * the UI type and live progress events use the flat `{ Downloading: N }`.
+ */
+function normalizeDownloadingStatus(raw: unknown): ModelStatus {
+  if (typeof raw === 'object' && raw !== null && 'Downloading' in raw) {
+    const downloading = raw.Downloading;
+    if (typeof downloading === 'object' && downloading !== null && 'progress' in downloading) {
+      const progress = downloading.progress;
+      if (typeof progress === 'number') {
+        return { Downloading: progress };
+      }
+    }
+    // Malformed Downloading payload: fall back to 0% rather than NaN%
+    return { Downloading: 0 };
+  }
+  return raw as ModelStatus;
+}
+
 
 export class WhisperAPI {
   static async init(): Promise<void> {
@@ -285,7 +305,11 @@ export class WhisperAPI {
   }
 
   static async getAvailableModels(): Promise<ModelInfo[]> {
-    return await invoke('whisper_get_available_models');
+    const models = await invoke<ModelInfo[]>('whisper_get_available_models');
+    // Same wire-shape mismatch as #742: Rust serializes
+    // `ModelStatus::Downloading { progress }` as a nested object while the UI
+    // type and live progress events use the flat { Downloading: N } shape.
+    return models.map(m => ({ ...m, status: normalizeDownloadingStatus(m.status) }));
   }
 
   static async loadModel(modelName: string): Promise<void> {
