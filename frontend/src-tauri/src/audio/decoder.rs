@@ -19,8 +19,11 @@ use symphonia::core::probe::Hint;
 use super::audio_processing::{audio_to_mono, resample, resample_audio};
 use super::ffmpeg::find_ffmpeg_path;
 
-/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
-const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma"];
+/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs).
+/// .ogg is included because Symphonia 0.5 has no Opus codec: .ogg files may carry
+/// Vorbis *or* Opus (e.g. WhatsApp voice notes are Opus-in-Ogg) and the payload
+/// cannot be told apart by extension. FFmpeg decodes both, same as webm.
+const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma", "ogg"];
 
 /// Progress callback for long-running operations
 /// Returns current progress (0-100) and a message
@@ -851,16 +854,17 @@ mod tests {
         assert!(needs_ffmpeg_conversion(Path::new("video.mkv")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.webm")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.wma")));
+        assert!(needs_ffmpeg_conversion(Path::new("voice-note.ogg")));
         // Case insensitive
         assert!(needs_ffmpeg_conversion(Path::new("meeting.MKV")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WMA")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WebM")));
+        assert!(needs_ffmpeg_conversion(Path::new("note.OGG")));
         // Symphonia-native formats should NOT need ffmpeg
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp4")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.wav")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp3")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.flac")));
-        assert!(!needs_ffmpeg_conversion(Path::new("audio.ogg")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.aac")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.m4a")));
         // No extension
