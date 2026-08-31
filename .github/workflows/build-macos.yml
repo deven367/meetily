@@ -96,6 +96,10 @@ jobs:
           workspaces: ". -> target"
           key: macos-latest-aarch64-apple-darwin
 
+      - name: Run Rust unit tests
+        working-directory: frontend/src-tauri
+        run: cargo test --lib
+
       - name: Install frontend dependencies
         run: |
           cd frontend
