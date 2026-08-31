@@ -173,7 +173,7 @@ impl TranscriptionProvider for CloudTranscriptionProvider {
             .client
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
-            .form(&form)
+            .multipart(form)
             .send()
             .await
             .map_err(|e| {
