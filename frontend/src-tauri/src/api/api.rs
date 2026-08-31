@@ -666,8 +666,18 @@ pub async fn api_save_transcript_config<R: Runtime>(
         return Err(e.to_string());
     }
 
-    if let Some(key) = api_key {
-        if !key.is_empty() {
+    match api_key {
+        Some(key) if key.trim().is_empty() => {
+            // Explicitly emptied key: remove the stored value so it can be
+            // cleared from the settings UI.
+            if let Err(e) =
+                SettingsRepository::clear_transcript_api_key(pool, &provider).await
+            {
+                log_error!("Failed to clear transcript API key: {}", e);
+                return Err(e.to_string());
+            }
+        }
+        Some(key) => {
             log_info!("API key provided, saving for transcript provider...");
             if let Err(e) = SettingsRepository::save_transcript_api_key(pool, &provider, &key).await
             {
@@ -675,6 +685,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
                 return Err(e.to_string());
             }
         }
+        None => {}
     }
 
     log_info!("Successfully saved transcript configuration.");

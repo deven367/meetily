@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -10,7 +11,7 @@ import { ParakeetModelManager } from './ParakeetModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai' | 'openrouter';
     model: string;
     apiKey?: string | null;
 }
@@ -27,6 +28,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [isSaving, setIsSaving] = useState<boolean>(false);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -37,6 +39,17 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
             setApiKey(null);
         }
+    }, [transcriptModelConfig.provider]);
+
+    // Load the stored key for the active provider. The field's local state is
+    // initialized before the async config load resolves, so this also runs
+    // when the provider becomes known after load.
+    useEffect(() => {
+        const provider = transcriptModelConfig.provider;
+        if (['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(provider)) {
+            fetchApiKey(provider);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [transcriptModelConfig.provider]);
 
     const fetchApiKey = async (provider: string) => {
@@ -56,9 +69,43 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
-        openai: ['gpt-4o'],
+        openai: ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'],
+        openrouter: ['openai/whisper-1', 'openai/whisper-large-v3', 'openai/gpt-4o-transcribe'],
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+    const requiresApiKey = ['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(uiProvider);
+
+    // Persist the currently shown selection (provider + model + API key) to the backend.
+    // Mirrors the Save flow of the summary model settings.
+    const handleSave = async () => {
+        setIsSaving(true);
+        try {
+            const providerNeedsKey = ['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(uiProvider);
+            // Empty string (field unlocked and cleared) deletes the stored key; null leaves it untouched.
+            const keyToSave = providerNeedsKey ? (apiKey && apiKey.trim() ? apiKey.trim() : '') : null;
+
+            await invoke('api_save_transcript_config', {
+                provider: uiProvider,
+                model: transcriptModelConfig.model,
+                apiKey: keyToSave,
+            });
+
+            // Sync in-app state so readiness checks pick the new config immediately
+            setTranscriptModelConfig({
+                provider: uiProvider,
+                model: transcriptModelConfig.model,
+                apiKey: keyToSave ?? transcriptModelConfig.apiKey ?? null,
+            });
+
+            toast.success('Transcription settings saved');
+        } catch (err) {
+            console.error('Failed to save transcription settings:', err);
+            toast.error('Failed to save transcription settings', {
+                description: err instanceof Error ? err.message : String(err),
+            });
+        } finally {
+            setIsSaving(false);
+        }
+    };
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -113,7 +160,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
                                     if (provider !== 'localWhisper' && provider !== 'parakeet') {
-                                        fetchApiKey(provider);
+                                        // Reset the model to this provider's default so a stale
+                                        // model from another provider (e.g. parakeet-*) is never
+                                        // shown or saved alongside it.
+                                        setTranscriptModelConfig({
+                                            ...transcriptModelConfig,
+                                            provider,
+                                            model: modelOptions[provider][0],
+                                        });
                                     }
                                 }}
                             >
@@ -123,10 +177,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
-                                    {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
-                                    <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
-                                    <SelectItem value="groq">☁️ Groq</SelectItem>
-                                    <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
+                                    <SelectItem value="openai">☁️ OpenAI (Cloud)</SelectItem>
+                                    <SelectItem value="openrouter">☁️ OpenRouter (Cloud)</SelectItem>
                                 </SelectContent>
                             </Select>
 
@@ -150,6 +202,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             )}
 
                         </div>
+                        {(uiProvider === 'openai' || uiProvider === 'openrouter') && (
+                            <p className="text-xs text-gray-500 mt-2 mx-1">
+                                Cloud transcription uploads audio in chunks over your connection while recording; results depend on network latency.
+                            </p>
+                        )}
                     </div>
 
                     {uiProvider === 'localWhisper' && (
@@ -219,6 +276,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             </div>
                         </div>
                     )}
+
+                    <div className="flex justify-end pt-2">
+                        <Button
+                            onClick={handleSave}
+                            disabled={isSaving}
+                            className="min-w-[80px]"
+                        >
+                            {isSaving ? 'Saving…' : 'Save'}
+                        </Button>
+                    </div>
                 </div>
             </div>
         </div >

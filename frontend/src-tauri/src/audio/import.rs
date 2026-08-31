@@ -18,7 +18,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{create_transcript_segments, get_or_init_cloud_provider, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -330,6 +330,7 @@ async fn run_import<R: Runtime>(
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_cloud = matches!(provider.as_deref(), Some("openai") | Some("openrouter"));
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -514,7 +515,7 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
+    let whisper_engine = if !use_parakeet && !use_cloud && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
@@ -524,6 +525,13 @@ async fn run_import<R: Runtime>(
     } else {
         None
     };
+    let cloud_engine: Option<Arc<crate::audio::transcription::cloud_provider::CloudTranscriptionProvider>> =
+        if use_cloud && total_segments > 0 {
+            let provider_id = provider.clone().unwrap();
+            Some(get_or_init_cloud_provider(&app, &provider_id, model.as_deref()).await?)
+        } else {
+            None
+        };
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -592,6 +600,13 @@ async fn run_import<R: Runtime>(
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             (text, 0.9f32)
+        } else if let Some(engine) = cloud_engine.as_ref() {
+            use crate::audio::transcription::provider::TranscriptionProvider;
+            let result = engine
+                .transcribe(segment.samples.clone(), language.clone())
+                .await
+                .map_err(|e| anyhow!("Cloud transcription failed on segment {}: {}", i, e))?;
+            (result.text, 0.9f32)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _) = engine

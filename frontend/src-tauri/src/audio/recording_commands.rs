@@ -671,6 +671,10 @@ pub async fn stop_recording<R: Runtime>(
                 warn!("⚠️ No Parakeet engine found to unload model");
             }
         }
+        Some("openai") | Some("openrouter") | Some("deepgram") | Some("elevenLabs") | Some("groq") => {
+            // Cloud providers never load a local model; nothing to unload.
+            info!("☁️ Cloud transcription provider has no local model to unload");
+        }
         _ => {
             // Default to Whisper
             info!("🎤 Unloading Whisper model...");
