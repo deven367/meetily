@@ -23,6 +23,34 @@ pub fn reset_speech_detected_flag() {
     info!("🔍 SPEECH_DETECTED_EMITTED reset to: {}", SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst));
 }
 
+/// A transcription result is emitted when it contains non-whitespace content.
+/// The length-derived confidence value is not a calibrated probability and
+/// must not gate emission (#675).
+pub fn should_emit_transcript(transcript: &str) -> bool {
+    !transcript.trim().is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_emit_transcript;
+
+    #[test]
+    fn short_utterances_are_emitted() {
+        // Regression coverage for #675: these scored ~0.12-0.16 under the old
+        // length-derived confidence and were dropped by the 0.3 threshold.
+        for text in ["OK", "Yes", "No", "Sure", "Got it", "Thanks", "Right", "Uh-huh"] {
+            assert!(should_emit_transcript(text), "expected {text:?} to be emitted");
+        }
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_are_dropped() {
+        assert!(!should_emit_transcript(""));
+        assert!(!should_emit_transcript("   "));
+        assert!(!should_emit_transcript("\n\t "));
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptUpdate {
     pub text: String,
@@ -152,24 +180,23 @@ pub fn start_transcription_task<R: Runtime>(
                             .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
-                                    // Provider-aware confidence threshold
-                                    let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
-                                        TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
-                                    };
-
+                                    // Emission is based on non-empty content, not on the
+                                    // confidence value: Whisper's confidence is derived
+                                    // from text length, not from acoustic or token
+                                    // probabilities, so it must not gate transcripts (#675)
+                                    // — short valid utterances ("OK", "Yes", "No") scored
+                                    // ~0.12-0.13 and were silently dropped. Whisper's own
+                                    // no-speech handling (no_speech_thold / logprob_thold /
+                                    // entropy_thold) already suppresses hallucinations.
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
                                         None => "N/A".to_string(),
                                     };
 
-                                    info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}, threshold={:.2}",
-                                          worker_id, transcript, confidence_str, is_partial, confidence_threshold);
+                                    info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}",
+                                          worker_id, transcript, confidence_str, is_partial);
 
-                                    // Check confidence threshold (or accept if no confidence provided)
-                                    let meets_threshold = confidence_opt.map_or(true, |c| c >= confidence_threshold);
-
-                                    if !transcript.trim().is_empty() && meets_threshold {
+                                    if should_emit_transcript(&transcript) {
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         info!("✅ Worker {} transcribed: {} (confidence: {}, partial: {})",
                                               worker_id, transcript, confidence_str, is_partial);
@@ -227,12 +254,6 @@ pub fn start_transcription_task<R: Runtime>(
                                             );
                                         }
                                         // PERFORMANCE: Removed verbose logging of every emission
-                                    } else if !transcript.trim().is_empty() && should_log_this_chunk
-                                    {
-                                        // PERFORMANCE: Only log low-confidence results occasionally
-                                        if let Some(c) = confidence_opt {
-                                            info!("Worker {} low-confidence transcription (confidence: {:.2}), skipping", worker_id, c);
-                                        }
                                     }
                                 }
                                 Err(e) => {
