@@ -60,9 +60,12 @@ impl CloudTranscriptionProvider {
     /// Shared constructor (also used by tests with a local endpoint)
     fn with_endpoint(endpoint: &str, api_key: String, model: String, label: &'static str) -> Self {
         let client = reqwest::Client::builder()
+            // Native TLS on macOS can fail long uploads with "bad MAC".
+            // Select rustls explicitly when multiple TLS features are enabled.
+            .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build rustls cloud transcription client");
 
         debug!(
             "Creating {} cloud transcription provider (model: {})",
@@ -147,11 +150,10 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     }
 }
 
-/// Transport-level failure that a single retry can reasonably clear
-/// (connection reset, TLS error, timeout). HTTP status errors are complete
-/// responses, not transport failures — retrying them cannot help.
+/// Retry send/connection/body errors once. reqwest reports some TLS failures
+/// (including macOS native-TLS "bad MAC") as `Request`, not `Connect`.
 fn is_transient(e: &reqwest::Error) -> bool {
-    e.is_connect() || e.is_timeout() || e.is_body()
+    e.is_request() || e.is_connect() || e.is_timeout() || e.is_body()
 }
 
 #[async_trait]
