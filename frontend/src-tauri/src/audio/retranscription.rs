@@ -739,6 +739,10 @@ fn write_retranscription_metadata(
             obj.insert("retranscribed_at".to_string(), serde_json::json!(now));
             obj.insert("status".to_string(), serde_json::json!("completed"));
             obj.insert("transcript_file".to_string(), serde_json::json!("transcripts.json"));
+            // Repair stale durations (#734): meetings imported before the HE-AAC
+            // decoder fix (#608) carry a halved duration; overwrite it with the
+            // just-decoded value while preserving every other field.
+            obj.insert("duration_seconds".to_string(), serde_json::json!(duration_seconds));
             obj.remove("detected_summary_language");
         }
         value
@@ -1012,5 +1016,70 @@ mod tests {
         // Non-audio formats
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
+    }
+
+    #[test]
+    fn test_retranscription_metadata_repairs_stale_duration() {
+        // #734: meetings imported before the HE-AAC decoder fix (#608) carry a
+        // halved duration_seconds in metadata.json. Retranscription must
+        // overwrite it with the just-decoded duration while preserving all
+        // other fields and the detected_summary_language cleanup.
+        let dir = tempfile::tempdir().unwrap();
+        let stale_metadata = serde_json::json!({
+            "version": "1.0",
+            "meeting_id": "meeting-734",
+            "created_at": "2026-08-01T00:00:00Z",
+            "completed_at": "2026-08-01T00:05:00Z",
+            "duration_seconds": 150.0,
+            "audio_file": "audio.mp4",
+            "transcript_file": "transcripts.json",
+            "status": "completed",
+            "detected_summary_language": "en",
+            "source": "import"
+        });
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            serde_json::to_string_pretty(&stale_metadata).unwrap(),
+        )
+        .unwrap();
+
+        write_retranscription_metadata(dir.path(), "meeting-734", 300.0, "audio.mp4").unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let repaired: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            repaired["duration_seconds"], 300.0,
+            "stale pre-#608 duration must be overwritten with the decoded value"
+        );
+        // Existing fields remain intact
+        assert_eq!(repaired["meeting_id"], "meeting-734");
+        assert_eq!(repaired["created_at"], "2026-08-01T00:00:00Z");
+        assert_eq!(repaired["completed_at"], "2026-08-01T00:05:00Z");
+        assert_eq!(repaired["audio_file"], "audio.mp4");
+        assert_eq!(repaired["source"], "import");
+        assert_eq!(repaired["status"], "completed");
+        assert_eq!(repaired["transcript_file"], "transcripts.json");
+        // Retranscription bookkeeping still added
+        assert!(repaired.get("retranscribed_at").is_some(), "retranscribed_at must be set");
+        // Existing cleanup unchanged
+        assert!(
+            repaired.get("detected_summary_language").is_none(),
+            "detected_summary_language must still be removed"
+        );
+    }
+
+    #[test]
+    fn test_retranscription_metadata_creates_missing_file() {
+        // No existing metadata: a fresh file is created with the decoded duration.
+        let dir = tempfile::tempdir().unwrap();
+
+        write_retranscription_metadata(dir.path(), "meeting-new", 42.5, "audio.mp4").unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let created: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(created["duration_seconds"], 42.5);
+        assert_eq!(created["meeting_id"], "meeting-new");
+        assert_eq!(created["source"], "retranscription");
     }
 }
