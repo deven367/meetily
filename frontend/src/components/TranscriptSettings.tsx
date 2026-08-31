@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -27,6 +28,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [isSaving, setIsSaving] = useState<boolean>(false);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -38,6 +40,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
+
+    // On mount, load the stored key for providers that use one (the field's local
+    // state is initialized before the async config load resolves)
+    useEffect(() => {
+        const provider = transcriptModelConfig.provider;
+        if (['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(provider)) {
+            fetchApiKey(provider);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const fetchApiKey = async (provider: string) => {
         try {
@@ -60,6 +72,38 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         openrouter: ['openai/whisper-1', 'openai/whisper-large-v3', 'openai/gpt-4o-transcribe'],
     };
     const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'openrouter' || transcriptModelConfig.provider === 'groq';
+
+    // Persist the currently shown selection (provider + model + API key) to the backend.
+    // Mirrors the Save flow of the summary model settings.
+    const handleSave = async () => {
+        setIsSaving(true);
+        try {
+            const providerNeedsKey = ['deepgram', 'elevenLabs', 'groq', 'openai', 'openrouter'].includes(uiProvider);
+            const keyToSave = providerNeedsKey && apiKey && apiKey.trim() ? apiKey.trim() : null;
+
+            await invoke('api_save_transcript_config', {
+                provider: uiProvider,
+                model: transcriptModelConfig.model,
+                apiKey: keyToSave,
+            });
+
+            // Sync in-app state so readiness checks pick the new config immediately
+            setTranscriptModelConfig({
+                provider: uiProvider,
+                model: transcriptModelConfig.model,
+                apiKey: keyToSave ?? transcriptModelConfig.apiKey ?? null,
+            });
+
+            toast.success('Transcription settings saved');
+        } catch (err) {
+            console.error('Failed to save transcription settings:', err);
+            toast.error('Failed to save transcription settings', {
+                description: err instanceof Error ? err.message : String(err),
+            });
+        } finally {
+            setIsSaving(false);
+        }
+    };
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -218,6 +262,16 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             </div>
                         </div>
                     )}
+
+                    <div className="flex justify-end pt-2">
+                        <Button
+                            onClick={handleSave}
+                            disabled={isSaving}
+                            className="min-w-[80px]"
+                        >
+                            {isSaving ? 'Saving…' : 'Save'}
+                        </Button>
+                    </div>
                 </div>
             </div>
         </div >
