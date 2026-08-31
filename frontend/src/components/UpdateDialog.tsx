@@ -213,7 +213,7 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 min-w-0">
           {!isDownloading && !error && (
             <>
               <div className="space-y-2">
