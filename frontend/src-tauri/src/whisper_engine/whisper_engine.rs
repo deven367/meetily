@@ -46,7 +46,22 @@ pub struct WhisperEngine {
     // Download cancellation tracking
     cancel_download_flag: Arc<RwLock<Option<String>>>, // Model name being cancelled
     // Active downloads tracking to prevent concurrent downloads
-    active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
+    active_downloads: Arc<std::sync::Mutex<HashSet<String>>>, // Set of models currently being downloaded
+}
+
+/// Removes a model from the active-transfer registry on drop so error,
+/// cancellation, and completion paths cannot leak membership.
+struct ActiveDownloadGuard {
+    active: Arc<std::sync::Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for ActiveDownloadGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(&self.name);
+        }
+    }
 }
 
 impl WhisperEngine {
@@ -162,7 +177,7 @@ impl WhisperEngine {
             // Initialize cancellation tracking
             cancel_download_flag: Arc::new(RwLock::new(None)),
             // Initialize active downloads tracking
-            active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            active_downloads: Arc::new(std::sync::Mutex::new(HashSet::new())),
         };
         
         Ok(engine)
@@ -176,7 +191,22 @@ impl WhisperEngine {
 
         for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
             let model_path = models_dir.join(filename);
-            let status = if model_path.exists() {
+            let status = if self.active_downloads.lock().unwrap().contains(name) {
+                // Active transfers take precedence over on-disk state: while a
+                // download is in flight the file may be absent, zero-byte, or
+                // partially written. Report cached progress when available,
+                // starting at 0.
+                let cached = self
+                    .available_models
+                    .read()
+                    .await
+                    .get(name)
+                    .and_then(|m| match &m.status {
+                        ModelStatus::Downloading { progress } => Some(*progress),
+                        _ => None,
+                    });
+                ModelStatus::Downloading { progress: cached.unwrap_or(0) }
+            } else if model_path.exists() {
                 // Check if file size is reasonable (at least 1MB for a valid model)
                 match std::fs::metadata(&model_path) {
                     Ok(metadata) => {
@@ -897,27 +927,8 @@ impl WhisperEngine {
     pub async fn download_model(&self, model_name: &str, progress_callback: Option<Box<dyn Fn(u8) + Send>>) -> Result<()> {
         log::info!("Starting download for model: {}", model_name);
 
-        // Check if download is already in progress for this model
-        {
-            let active = self.active_downloads.read().await;
-            if active.contains(model_name) {
-                log::warn!("Download already in progress for model: {}", model_name);
-                return Err(anyhow!("Download already in progress for model: {}", model_name));
-            }
-        }
-
-        // Add to active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.insert(model_name.to_string());
-        }
-
-        // Clear any previous cancellation flag for this model
-        {
-            let mut cancel_flag = self.cancel_download_flag.write().await;
-            *cancel_flag = None;
-        }
-
+        // Validate the model name first so unsupported names never enter
+        // the active-transfer registry.
         // Official ggerganov/whisper.cpp model URLs from Hugging Face
         let model_url = match model_name {
             // Standard f16 models
@@ -940,11 +951,36 @@ impl WhisperEngine {
 
             _ => return Err(anyhow!("Unsupported model: {}", model_name))
         };
-        
-        log::info!("Model URL for {}: {}", model_name, model_url);
-        
+
         // Generate correct filename - all models follow ggml-{model_name}.bin pattern
         let filename = format!("ggml-{}.bin", model_name);
+
+        // Check if download is already in progress for this model
+        {
+            let active = self.active_downloads.lock().unwrap();
+            if active.contains(model_name) {
+                log::warn!("Download already in progress for model: {}", model_name);
+                return Err(anyhow!("Download already in progress for model: {}", model_name));
+            }
+        }
+
+        // Add to active downloads; the guard removes the membership on every
+        // exit path (error, cancellation, completion).
+        {
+            let mut active = self.active_downloads.lock().unwrap();
+            active.insert(model_name.to_string());
+        }
+        let _active_transfer = ActiveDownloadGuard {
+            active: Arc::clone(&self.active_downloads),
+            name: model_name.to_string(),
+        };
+
+        // Clear any previous cancellation flag for this model
+        {
+            let mut cancel_flag = self.cancel_download_flag.write().await;
+            *cancel_flag = None;
+        }
+
         let file_path = self.models_dir.join(&filename);
         
         log::info!("Downloading to file path: {}", file_path.display());
@@ -972,9 +1008,6 @@ impl WhisperEngine {
         
         log::info!("Received response with status: {}", response.status());
         if !response.status().is_success() {
-            // Remove from active downloads on error
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
             return Err(anyhow!("Download failed with status: {}", response.status()));
         }
         
@@ -1011,9 +1044,6 @@ impl WhisperEngine {
                 let cancel_flag = self.cancel_download_flag.read().await;
                 if cancel_flag.as_ref() == Some(&model_name.to_string()) {
                     log::info!("Download cancelled for {}", model_name);
-                    // Remove from active downloads on cancellation
-                    let mut active = self.active_downloads.write().await;
-                    active.remove(model_name);
                     return Err(anyhow!("Download cancelled by user"));
                 }
             }
@@ -1087,12 +1117,6 @@ impl WhisperEngine {
             }
         }
 
-        // Remove from active downloads on completion
-        {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-        }
-
         Ok(())
     }
     
@@ -1107,7 +1131,7 @@ impl WhisperEngine {
 
         // Remove from active downloads
         {
-            let mut active = self.active_downloads.write().await;
+            let mut active = self.active_downloads.lock().unwrap();
             active.remove(model_name);
         }
 
@@ -1133,5 +1157,70 @@ impl WhisperEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn status_of(engine: &WhisperEngine, name: &str) -> ModelStatus {
+        engine
+            .discover_models()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("model {} not in catalog", name))
+            .status
+    }
+
+    #[tokio::test]
+    async fn test_discover_reports_downloading_while_transfer_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(temp.path().to_path_buf()))
+            .expect("engine in temp dir");
+
+        // Transfer active with no file on disk -> Downloading, initial progress 0.
+        engine.active_downloads.lock().unwrap().insert("base".to_string());
+        assert!(
+            matches!(
+                status_of(&engine, "base").await,
+                ModelStatus::Downloading { progress: 0 }
+            ),
+            "absent file with active transfer must report Downloading"
+        );
+
+        // Zero-byte file while the transfer is active -> still Downloading.
+        std::fs::File::create(temp.path().join("ggml-base.bin")).unwrap();
+        assert!(
+            matches!(
+                status_of(&engine, "base").await,
+                ModelStatus::Downloading { .. }
+            ),
+            "zero-byte file with active transfer must report Downloading"
+        );
+
+        // Cached progress is preserved.
+        {
+            let mut models = engine.available_models.write().await;
+            if let Some(m) = models.get_mut("base") {
+                m.status = ModelStatus::Downloading { progress: 42 };
+            }
+        }
+        assert!(
+            matches!(
+                status_of(&engine, "base").await,
+                ModelStatus::Downloading { progress: 42 }
+            ),
+            "cached download progress must be preserved"
+        );
+
+        // No active transfer -> disk classification returns (zero-byte file = Missing).
+        engine.active_downloads.lock().unwrap().remove("base");
+        assert!(
+            matches!(status_of(&engine, "base").await, ModelStatus::Missing),
+            "without an active transfer the disk classification must apply"
+        );
     }
 }
