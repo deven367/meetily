@@ -1217,7 +1217,7 @@ mod tests {
         );
 
         // No active transfer -> disk classification returns (zero-byte file = Missing).
-        engine.active_downloads.lock().unwrap().remove("base");
+        engine.active_downloads.lock().unwrap().remove(&"base".to_string());
         assert!(
             matches!(status_of(&engine, "base").await, ModelStatus::Missing),
             "without an active transfer the disk classification must apply"
