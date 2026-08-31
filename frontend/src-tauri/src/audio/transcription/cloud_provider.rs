@@ -26,8 +26,16 @@ const MIN_CLOUD_SAMPLES: usize = 1600;
 /// Upper bound for a single cloud request (OpenRouter limits uploads to 25 MB)
 const MAX_CLOUD_SAMPLES: usize = 5 * 60 * 16000; // 5 minutes at 16 kHz
 
-/// Request timeout for a single transcription call
-const REQUEST_TIMEOUT_SECS: u64 = 60;
+/// Request timeout for a single transcription call. Segments are up to 5
+/// minutes of audio and remote processing (notably via a proxy like
+/// OpenRouter) can legitimately take longer than a minute.
+const REQUEST_TIMEOUT_SECS: u64 = 300;
+
+/// Attempts per transcription call: one retry on transient transport
+/// failures (connection reset, TLS error, timeout). Without it, a single
+/// flaky VPN/WiFi/proxy hiccup on one segment aborts the whole import.
+const MAX_ATTEMPTS: u32 = 2;
+const RETRY_DELAY_MS: u64 = 2000;
 
 /// Cloud transcription provider (OpenAI and OpenRouter)
 pub struct CloudTranscriptionProvider {
@@ -46,7 +54,11 @@ impl CloudTranscriptionProvider {
             "openrouter" => (OPENROUTER_TRANSCRIPTION_URL, "OpenRouter"),
             _ => (OPENAI_TRANSCRIPTION_URL, "OpenAI"),
         };
+        Self::with_endpoint(endpoint, api_key, model, label)
+    }
 
+    /// Shared constructor (also used by tests with a local endpoint)
+    fn with_endpoint(endpoint: &str, api_key: String, model: String, label: &'static str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
@@ -135,6 +147,13 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     }
 }
 
+/// Transport-level failure that a single retry can reasonably clear
+/// (connection reset, TLS error, timeout). HTTP status errors are complete
+/// responses, not transport failures — retrying them cannot help.
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout() || e.is_body()
+}
+
 #[async_trait]
 impl TranscriptionProvider for CloudTranscriptionProvider {
     async fn transcribe(
@@ -166,20 +185,6 @@ impl TranscriptionProvider for CloudTranscriptionProvider {
 
         let wav = encode_wav_pcm16(&audio);
 
-        let mut form = reqwest::multipart::Form::new()
-            .part(
-                "file",
-                reqwest::multipart::Part::bytes(wav).file_name("audio.wav"),
-            )
-            .text("model", self.model.clone())
-            .text("response_format", "json");
-
-        if let Some(lang) = &language {
-            if !lang.is_empty() {
-                form = form.text("language", lang.clone());
-            }
-        }
-
         debug!(
             "{}: uploading {:.2}s of audio to {} (model: {})",
             self.provider_label,
@@ -188,25 +193,77 @@ impl TranscriptionProvider for CloudTranscriptionProvider {
             self.model
         );
 
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| {
-                TranscriptionError::EngineFailed(format!(
-                    "{} request failed: {}",
-                    self.provider_label, e
-                ))
-            })?;
+        let mut last_err = String::new();
+        let mut body: Option<String> = None;
+        let mut status: Option<reqwest::StatusCode> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                debug!(
+                    "{}: retrying transcription ({}/{}) after: {}",
+                    self.provider_label, attempt, MAX_ATTEMPTS, last_err
+                );
+            }
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| TranscriptionError::EngineFailed(e.to_string()))?;
+            // The request consumes the form, so it is rebuilt per attempt
+            let mut form = reqwest::multipart::Form::new()
+                .part(
+                    "file",
+                    reqwest::multipart::Part::bytes(wav.clone()).file_name("audio.wav"),
+                )
+                .text("model", self.model.clone())
+                .text("response_format", "json");
+            if let Some(lang) = &language {
+                if !lang.is_empty() {
+                    form = form.text("language", lang.clone());
+                }
+            }
+
+            let response = match self
+                .client
+                .post(&self.endpoint)
+                .bearer_auth(&self.api_key)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(e) if is_transient(&e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+                Err(e) => {
+                    return Err(TranscriptionError::EngineFailed(format!(
+                        "{} request failed: {}",
+                        self.provider_label, e
+                    )));
+                }
+            };
+
+            let resp_status = response.status();
+            match response.text().await {
+                Ok(text) => {
+                    body = Some(text);
+                    status = Some(resp_status);
+                    break;
+                }
+                Err(e) if is_transient(&e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+                Err(e) => return Err(TranscriptionError::EngineFailed(e.to_string())),
+            }
+        }
+
+        let (status, body) = match (status, body) {
+            (Some(status), Some(body)) => (status, body),
+            _ => {
+                return Err(TranscriptionError::EngineFailed(format!(
+                    "{} request failed after {} attempts: {} — check network/VPN/proxy/antivirus and try again",
+                    self.provider_label, MAX_ATTEMPTS, last_err
+                )))
+            }
+        };
 
         if !status.is_success() {
             return Err(TranscriptionError::EngineFailed(format!(
@@ -250,5 +307,68 @@ impl TranscriptionProvider for CloudTranscriptionProvider {
 
     fn provider_name(&self) -> &'static str {
         self.provider_label
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A transient transport failure (first connection dropped) must be
+    /// retried instead of failing the call; the second attempt succeeds.
+    #[tokio::test]
+    async fn test_transient_transport_error_is_retried() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Attempt 1: accept, then drop immediately -> transport error client-side
+            let (_socket, _) = listener.accept().await.unwrap();
+            // Attempt 2: drain headers + Content-Length bytes of body, then answer
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..n]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let headers = String::from_utf8_lossy(&raw[..headers_end]).to_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut body_have = raw.len().saturating_sub(headers_end);
+            while body_have < content_length {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                body_have += n;
+            }
+            let resp = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 18\r\n\r\n{\"text\":\"retried\"}";
+            socket.write_all(resp).await.unwrap();
+        });
+
+        let provider = CloudTranscriptionProvider::with_endpoint(
+            &format!("http://{}", addr),
+            "test-key".to_string(),
+            "test-model".to_string(),
+            "OpenAI",
+        );
+
+        // 125 ms of 16 kHz audio (above MIN_CLOUD_SAMPLES)
+        let audio = vec![0.1f32; 2000];
+        let result = provider.transcribe(audio, None).await;
+
+        let result = result.expect("transient failure on first attempt must be retried, not propagated");
+        assert_eq!(result.text, "retried");
     }
 }
