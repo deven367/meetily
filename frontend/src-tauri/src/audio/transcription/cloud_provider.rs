@@ -187,6 +187,7 @@ impl TranscriptionProvider for CloudTranscriptionProvider {
 
         debug!(
             "{}: uploading {:.2}s of audio to {} (model: {})",
+            self.provider_label,
             audio.len() as f64 / 16000.0,
             self.endpoint,
             self.model
@@ -320,10 +321,9 @@ mod tests {
     async fn test_transient_transport_error_is_retried() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-
         tokio::spawn(async move {
             // Attempt 1: accept, then drop immediately -> transport error client-side
-            let (socket, _) = listener.accept().await.unwrap();
+            let (_socket, _) = listener.accept().await.unwrap();
             // Attempt 2: drain headers + Content-Length bytes of body, then answer
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut raw = Vec::new();
